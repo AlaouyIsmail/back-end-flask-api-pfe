@@ -4,6 +4,7 @@ from functools import wraps
 from dotenv import load_dotenv as do
 from datetime import datetime, timedelta
 import score 
+from apscheduler.schedulers.background import BackgroundScheduler
 do()
 
 DB_NAME = "database.db"
@@ -53,6 +54,110 @@ def save_profile_img(file):
     path = os.path.join(UPLOAD_FOLDER, filename)
     file.save(path)
     return filename
+
+# =========================
+# calc charge chaque 30 min
+# =========================
+
+def difficulty_to_percentage(difficulty):
+    return {
+        "easy": 15,
+        "medium": 40,
+        "hard": 65
+    }.get(difficulty, 0)
+
+
+ # =========================
+ # 1️⃣ Update project status + days_remaining
+ # =========================
+def update_projects_and_charge():
+    con, cur = get_db()
+    try:
+        today_date = datetime.now().date()
+        cur.execute("SELECT * FROM projects")
+        projects = cur.fetchall()
+        for proj in projects:
+            proj_id = proj["id"]
+            chef_id = proj["chef_id"]
+            status = proj["status"]
+
+            try:
+                start_date = datetime.strptime(proj["start_date"], "%Y-%m-%d").date()
+                end_date = datetime.strptime(proj["end_date"], "%Y-%m-%d").date()
+            except:
+                continue  
+            new_status = status
+
+            # planned → active
+            if status == "planned" and today_date >= start_date:
+                new_status = "active"
+
+            # active → finished
+            if status == "active" and today_date > end_date:
+                new_status = "finished"
+
+         
+            if new_status == "active":
+                days_remaining = (end_date - today_date).days
+                if days_remaining < 0:
+                    days_remaining = 0
+
+            elif new_status == "planned":
+                days_remaining = (start_date - today_date).days
+                if days_remaining < 0:
+                    days_remaining = 0
+
+            else:
+                days_remaining = 0
+
+            
+            cur.execute("""
+                UPDATE projects
+                SET status=?, days_remaining=?
+                WHERE id=?
+            """, (new_status, days_remaining, proj_id))
+
+        # =========================
+        # 2️⃣ Recalculate charge for each CHEF
+        # =========================
+        cur.execute("SELECT id FROM users WHERE role='CHEF'")
+        chefs = cur.fetchall()
+
+        for chef in chefs:
+            chef_id = chef["id"]
+
+            cur.execute("""
+                SELECT difficulty FROM projects
+                WHERE chef_id=? AND status='active'
+            """, (chef_id,))
+            active_projects = cur.fetchall()
+
+            total_charge = 0
+
+            for p in active_projects:
+                total_charge += difficulty_to_percentage(p["difficulty"])
+
+            total_charge = min(total_charge, 100)
+
+            cur.execute("""
+                UPDATE chef_profiles
+                SET charge_affectee=?
+                WHERE chef_id=?
+            """, (total_charge, chef_id))
+
+        con.commit()
+        print("Auto update: status + charge + days_remaining updated")
+
+    except Exception as e:
+        print("Scheduler Error:", e)
+
+    finally:
+        con.close()
+
+
+scheduler = BackgroundScheduler()
+scheduler.add_job(update_projects_and_charge, "interval", minutes=4)
+scheduler.start()
 
 # =========================
 # REGISTER COMPANY + RH
@@ -112,7 +217,7 @@ def login():
         "id":user["id"],
         "role":user["role"],
         "company_id":user["company_id"],
-        "exp":datetime.utcnow()+timedelta(hours=6)
+        "exp":datetime.utcnow()+timedelta(hours=24)
     }, SECRET, algorithm="HS256")
 
     return jsonify({"token":token}),200
@@ -130,7 +235,7 @@ def add_chef(user):
     last_name = request.form.get("last_name")
     email = request.form.get("email")
     password = request.form.get("password")
-    dispo = request.form.get("disponibilite_hebdo", 40)
+    dispo = request.form.get("disponibilite_hebdo",100)
     profile_img = request.files.get("profile_img")
 
     if not first_name or not last_name or not email or not password:
@@ -159,56 +264,118 @@ def add_chef(user):
 # =========================
 # CHEF → ADD RESSOURCE (avec competence_moyenne)
 # =========================
+
+
 @app.route("/ressource", methods=["POST"])
 @verify_token
 def add_ressource(user):
-    if user["role"]!="CHEF":
-        return jsonify({"error":"Permission denied"}),403
 
     first_name = request.form.get("first_name")
     last_name = request.form.get("last_name")
     email = request.form.get("email")
     password = request.form.get("password")
+
     experience = int(request.form.get("experience",0))
     cost_hour = float(request.form.get("cost_hour",0))
-    dispo = int(request.form.get("disponibilite_hebdo", 40))
+    dispo = int(request.form.get("disponibilite_hebdo",40))
     charge_affectee = int(request.form.get("charge_affectee",0))
-    competence_moyenne = float(request.form.get("competence_moyenne",50) ) 
+    competence_moyenne = float(request.form.get("competence_moyenne",50))
+
     profile_img = request.files.get("profile_img")
-    # new_score =0
-    new_score=score.ressource_score(experience, cost_hour,dispo,charge_affectee,competence_moyenne)
+
     if not first_name or not last_name or not email or not password:
         return jsonify({"error":"Missing data"}),400
+
+    # ================================
+    # تحديد chef_id حسب الدور
+    # ================================
+    if user["role"] == "RH":
+        chef_id = request.form.get("chef_id")
+        if not chef_id:
+            return jsonify({"error":"chef_id required"}),400
+
+        # التأكد أن chef ينتمي لنفس الشركة
+        con, cur = get_db()
+        cur.execute("""
+            SELECT * FROM users
+            WHERE id=? AND role='CHEF' AND company_id=?
+        """,(chef_id,user["company_id"]))
+        chef = cur.fetchone()
+        con.close()
+
+        if not chef:
+            return jsonify({"error":"Chef not found"}),404
+
+    elif user["role"] == "CHEF":
+        chef_id = user["id"]
+
+    else:
+        return jsonify({"error":"Permission denied"}),403
+
+    # ================================
+    # حساب score
+    # ================================
+    new_score = score.ressource_score(
+        experience,
+        cost_hour,
+        dispo,
+        charge_affectee,
+        competence_moyenne
+    )
 
     filename = save_profile_img(profile_img)
     hashed_pw = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
 
     con, cur = get_db()
     try:
+        # إنشاء user
         cur.execute("""
-            INSERT INTO users (first_name,last_name,email,password,role,company_id,profile_img)
+            INSERT INTO users
+            (first_name,last_name,email,password,role,company_id,profile_img)
             VALUES (?,?,?,?,?,?,?)
-        """,(first_name,last_name,email,hashed_pw,"RESSOURCE",user["company_id"],filename))
+        """,(
+            first_name,
+            last_name,
+            email,
+            hashed_pw,
+            "RESSOURCE",
+            user["company_id"],
+            filename
+        ))
+
         res_id = cur.lastrowid
-     
+
+        # إنشاء profile
         cur.execute("""
             INSERT INTO ressource_profiles (
-                ressource_id, chef_id, niveau_experience, disponibilite_hebdo,
-                cout_horaire, charge_affectee, competence_moyenne, score
+                ressource_id,
+                chef_id,
+                niveau_experience,
+                disponibilite_hebdo,
+                cout_horaire,
+                charge_affectee,
+                competence_moyenne,
+                score
             )
             VALUES (?,?,?,?,?,?,?,?)
         """,(
             res_id,
-            user["id"],
-            int(experience),
-            int(dispo),
-            float(cost_hour),
-            int(charge_affectee),
-            float(competence_moyenne),
-            new_score,
+            chef_id,
+            experience,
+            dispo,
+            cost_hour,
+            charge_affectee,
+            competence_moyenne,
+           round(new_score)
         ))
+   
         con.commit()
-        return jsonify({"msg":"Ressource created"}),201
+
+        return jsonify({
+            "msg":"Ressource created",
+            "chef_id": chef_id
+        }),201
+
     finally:
         con.close()
 
@@ -352,7 +519,7 @@ def dashboard_resources(user):
     con, cur = get_db()
     try:
         # ======================================================
-        # RH → chefs + ressources (كل التفاصيل)
+        # RH → chefs + ressources 
         # ======================================================
         if user["role"] == "RH":
             cur.execute("""
@@ -454,6 +621,103 @@ def dashboard_resources(user):
 
     finally:
         con.close()
+
+
+
+# =========================
+# CREATE PROJECT (by RH)
+# =========================
+
+@app.route("/project/create", methods=["POST"])
+@verify_token
+def create_project(user):
+    if user["role"] != "RH":
+        return jsonify({"error": "Permission denied"}), 403
+
+    name = request.form.get("name")
+    description = request.form.get("description")
+    difficulty = request.form.get("difficulty")  # easy | medium | hard
+    chef_id = int(request.form.get("chef_id"))
+    start_date = request.form.get("start_date")
+    end_date = request.form.get("end_date")
+
+    if not all([name, difficulty, chef_id, start_date, end_date]):
+        return jsonify({"error": "Missing data"}), 400
+
+    difficulty_map = {
+        "easy": 15,
+        "medium": 40,
+        "hard": 60
+    }
+
+    if difficulty not in difficulty_map:
+        return jsonify({"error": "Invalid difficulty"}), 400
+
+    charge_to_add = difficulty_map[difficulty]
+
+    con, cur = get_db()
+    try:
+        # التأكد أن chef ينتمي لنفس الشركة
+        cur.execute("SELECT * FROM users WHERE id=? AND role='CHEF' AND company_id=?",
+                    (chef_id, user["company_id"]))
+        chef = cur.fetchone()
+        if not chef:
+            return jsonify({"error": "Chef not found"}), 404
+
+        # جلب charge الحالي
+        cur.execute("SELECT charge_affectee FROM chef_profiles WHERE chef_id=?",
+                    (chef_id,))
+        chef_profile = cur.fetchone()
+
+        current_charge = chef_profile["charge_affectee"]
+
+        if current_charge + charge_to_add > 100:
+            return jsonify({"error": "Chef is overloaded"}), 400
+
+        # حساب المدة
+        from datetime import datetime
+        d1 = datetime.strptime(start_date, "%Y-%m-%d")
+        d2 = datetime.strptime(end_date, "%Y-%m-%d")
+        duration = (d2 - d1).days
+
+        # إدخال المشروع
+        cur.execute("""
+            INSERT INTO projects
+            (name, description, difficulty, chef_id, company_id,
+             start_date, end_date, duration_days, status,days_remaining)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,?)
+        """, (
+            name,
+            description,
+            difficulty,
+            chef_id,
+            user["company_id"],
+            start_date,
+            end_date,
+            duration,
+            "planned",
+            duration,
+        ))
+
+        # تحديث charge chef
+        new_charge = current_charge + charge_to_add
+
+        cur.execute("""
+            UPDATE chef_profiles
+            SET charge_affectee=?
+            WHERE chef_id=?
+        """, (new_charge, chef_id))
+
+        con.commit()
+
+        return jsonify({
+            "msg": "Project created",
+            "new_chef_charge": new_charge
+        }), 201
+
+    finally:
+        con.close()
+
 
 
 # =========================

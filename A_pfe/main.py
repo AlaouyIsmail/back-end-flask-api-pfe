@@ -219,7 +219,6 @@ def update_user(user, user_id):
         target_user = cur.fetchone()
         if not target_user:
             return jsonify({"error":"User not found"}),404
-
         # ===== صلاحيات RH =====
         if user["role"]=="RH":
             # يمكنه تعديل نفسه أو أي مستخدم آخر
@@ -246,19 +245,18 @@ def update_user(user, user_id):
             hashed_pw = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
         else:
             hashed_pw = target_user["password"]
-
-        # ===== تحديث جدول users =====
+         # ===== تحديث جدول users =====
         cur.execute("""
-            UPDATE users SET first_name=?, last_name=?, email=?, password=?, profile_img=?
-            WHERE id=?""",(first_name,last_name,email,hashed_pw,filename,user_id))
-        # ===== تحديث اسم الشركة إذا كان RH يعدّل نفسه =====
+        UPDATE users SET first_name=?, last_name=?, email=?, password=?, profile_img=?
+        WHERE id=?""",(first_name,last_name,email,hashed_pw,filename,user_id))
+         # ===== تحديث اسم الشركة إذا كان RH يعدّل نفسه =====
         if target_user["role"]=="RH" and user["id"] == user_id:
             company_name = request.form.get("company_name")
             if company_name:
                 cur.execute("""
                     UPDATE companies SET name=?
                     WHERE id=?
-                """,(company_name,target_user["company_id"]))
+                    """,(company_name,target_user["company_id"]))
         # ===== تحديث ressource_profiles إذا كان RESSOURCE =====
         if target_user["role"]=="RESSOURCE":
             experience = int(request.form.get("experience", 0))
@@ -266,12 +264,11 @@ def update_user(user, user_id):
             dispo = int(request.form.get("disponibilite_hebdo", 40))
             charge_affectee = int(request.form.get("charge_affectee", 0))
             competence_moyenne = float(request.form.get("competence_moyenne", 50))
-
             new_score = score.ressource_score(experience, cost_hour, dispo, charge_affectee, competence_moyenne)
             cur.execute("""
                 UPDATE ressource_profiles
                 SET niveau_experience=?, disponibilite_hebdo=?, cout_horaire=?,
-                    charge_affectee=?, competence_moyenne=?, score=?
+                charge_affectee=?, competence_moyenne=?, score=?
                 WHERE ressource_id=?
             """, (
                 experience, dispo, cost_hour, charge_affectee, competence_moyenne, new_score, user_id

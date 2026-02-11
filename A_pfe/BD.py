@@ -69,6 +69,31 @@ def create_db():
     )
     """)
 
+    # =====================================================
+    # PROJECTS
+    # =====================================================
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        difficulty TEXT CHECK(difficulty IN ('easy','medium','hard')) NOT NULL,
+        start_date TEXT,
+        end_date TEXT,
+        duration_days INTEGER,
+        days_remaining INTEGER,
+        status TEXT CHECK(status IN ('planned','active','finished')) DEFAULT 'planned',
+        company_id INTEGER NOT NULL,
+        chef_id INTEGER NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (company_id) REFERENCES companies(id),
+        FOREIGN KEY (chef_id) REFERENCES users(id)
+)
+""")
+
+
+
     con.commit()
     con.close()
     print("✅ Logical Database created successfully")
