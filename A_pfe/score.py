@@ -36,6 +36,5 @@ def ressource_score(niveau_experience, cout_horaire, disponibilite_hebdo,
 
     return float(np.clip(pred_score, 0, 100))
 
-
 if __name__ == "__main__":
     app.run(debug=True)
