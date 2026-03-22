@@ -22,6 +22,10 @@ app = Flask(__name__)
 # =========================
 # DATABASE HELPER
 # =========================
+@app.route("/")
+def home():
+    return "API is working 🚀"
+    
 def get_db():
     """
     Create database connection with Row factory for dict-like access
